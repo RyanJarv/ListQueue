@@ -1,4 +1,4 @@
-module github.com/RyanJarv/ListQueue
+module github.com/RyanJarv/lq
 
 go 1.18
 
