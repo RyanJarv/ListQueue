@@ -1,4 +1,4 @@
-package listQueue
+package lq
 
 import (
 	"sync"
