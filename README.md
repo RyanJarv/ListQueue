@@ -18,7 +18,7 @@ returned from this channel, q.Done() must be called once the processing of that 
 		}
 	
 		q.Add(3, 4)
-	for v := range q.Each() {
+		for v := range q.Each() {
 		    	// Prints: 	1
 	  		//		2
 	  		//		3
