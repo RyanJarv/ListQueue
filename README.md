@@ -14,7 +14,7 @@ returned from this channel, q.Done() must be called once the processing of that 
 	    		// Prints: 	1
 	      		//		2
 	     		fmt.Println(v)
-	        q.Done()
+	        	q.Done()
 		}
 	
 		q.Add(3, 4)
