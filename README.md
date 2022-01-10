@@ -2,7 +2,7 @@
 
 NewListQueue returns a queue which ensures in order delivery of every past and future event to every subscriber.
 
-	q := listQueue.NewListQueue[int]()
+	q := lq.NewListQueue[int]()
 	q.Add(1, 2)
 	ch := q.Each() // Ensure Each() is called before Wait()
 
