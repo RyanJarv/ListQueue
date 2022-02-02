@@ -4,30 +4,44 @@ import (
 	"sync"
 )
 
-type any interface{}
+const ChanSize = 10
+
+type IWaitGroup interface {
+	Add(i int)
+	Done()
+	Wait()
+}
 
 type IListQueue[T any] interface {
 	Add(...T)
+	Each() chan T
+	Close()
+	Wait()
 }
 
-// NewListQueue returns a queue which ensures in order delivery of every past and future event to every subscriber
+// NewListQueue returns a queue which ensures exactly once, in order delivery of every past and future event to every
+// subscriber.
 //
 //    		q := listQueue.NewListQueue[int]()
 //    		q.Add(1, 2)
-//    		ch := q.Each() // Ensure Each() is called before Wait()
+//    		ch := q.Each()
 //
-// q.Each() will return a channel which iterates over past and future arguments added with q.Add(...). For each itemi
-// returned from this channel, q.Done() must be called once the processing of that item is complete.
+// q.Each() will return a channel which can be used to iterate over past and future arguments added with Add(...).
+// For each item returned from this channel. The queue needs to be closed after all items have been added with Add(...)
+// for loops using q.Each() to exit.
 //
 //    	    go func() {
-// 	  	    for v := range ch {
-// 	  	    	    // Prints: 		1
-// 	  	      	//				2
-// 	  	      	fmt.Println(v)
-// 	  	      	q.Done()
-// 	  	    }
+// 	  	      for v := range ch {
+// 	  	      	    // Prints: 		1
+// 	  	        	//				2
+// 	  	        	fmt.Println(v)
+// 	  	        	q.Done()
+// 	  	      }
+//
+// Loops created after Close() is called will still work as expected, but new values can't be added with Add(...).
 //
 //   		  q.Add(3, 4)
+//   		  q.Close()
 //   		  for v := range q.Each() {
 //   		  	    // Prints: 		1
 //   		    	//				2
@@ -41,88 +55,62 @@ type IListQueue[T any] interface {
 //    	// Waits for all events to be delivered to all channels
 //    	q.Wait()
 //
-func NewListQueue[T any]() *ListQueue[T] {
+func NewListQueue[T any](items ...T) *ListQueue[T] {
 	return &ListQueue[T]{
-		work:    &sync.WaitGroup{},
-		items:   make([]T, 0, 1000),
-		c:       sync.NewCond(&sync.Mutex{}),
-		notDone: true,
+		items: items,
+		m:     &sync.RWMutex{},
+		w:     &sync.WaitGroup{},
 	}
-}
-
-type IWaitGroup interface {
-	Add(int)
-	Done()
-	Wait()
 }
 
 type ListQueue[T any] struct {
-	work        IWaitGroup
-	items       []T
-	c           *sync.Cond
-	notDone     bool
-	subscribers int
-}
-
-// sendFrom takes a starting index and a channel and sends all items that have been added since the given index
-func (s *ListQueue[T]) sendFrom(start int, ch chan T) int {
-	var i int
-	var v T
-	for i, v = range s.items[start:] {
-		ch <- v
-	}
-	return i
-}
-
-// next waits for the next batch of items after index i to be placed on the list.
-func (s *ListQueue[T]) next(i int) bool {
-	s.c.L.Lock()
-	s.c.Wait()
-	s.c.L.Unlock()
-	return s.notDone && len(s.items) != i
+	items     []T
+	m         *sync.RWMutex
+	w         IWaitGroup
+	listeners []chan T
 }
 
 // Each returns a channel which will be sent all current and future items passed to Add in the order they were added.
 func (s *ListQueue[T]) Each() chan T {
-	// For each new subscriber all items need to be returned.
-	s.subscribers++
-	s.work.Add(len(s.items))
+	s.w.Add(1)
 
-	itemCh := make(chan T, 0)
+	s.m.RLock()
+	// Grab the number of items at the moment to ensure we don't double process messages in the case we finish iterating
+	// the backlog between the time the backlog updates and items start getting fed to the listeners in s.Add.
+	numItems := len(s.items)
+
+	// Create a listener right early, so we don't miss any messages added when we are processing the backlog.
+	listener := make(chan T, numItems+ChanSize)
+	s.listeners = append(s.listeners, listener)
+	s.m.RUnlock()
+
 	go func() {
-		// Catch this subscriber up to the current tip.
-		i := s.sendFrom(0, itemCh)
-
-		// Wait to be notified of more items, then iterate over them.
-		for s.next(i) {
-			i = s.sendFrom(i, itemCh)
+		for i := 0; i < numItems; i++ {
+			listener <- s.items[i]
 		}
-		close(itemCh)
+		s.w.Done()
 	}()
 
-	return itemCh
-}
-
-// Done must be called after processing is finished for each item sent to the channel returned by Each.
-func (s *ListQueue[T]) Done() {
-	s.work.Done()
-}
-
-// Wait must be called after Each() for channels returned by Each() to be closed on completion.
-//
-// If called before Each() this function will return immediately.
-func (s *ListQueue[T]) Wait() {
-	s.work.Wait() // Wait for all items to be returned.
-	s.notDone = false
-	s.c.Broadcast() // Release any goroutines waiting on s.next()
+	return listener
 }
 
 // Add adds all passsed arguments to the list and wakes up any paused goroutines to continue reading from the list.
 func (s *ListQueue[T]) Add(items ...T) {
-	// An item needs to be returned once for each subscriber.
-	s.work.Add(len(items) * s.subscribers)
-	s.c.L.Lock() // TODO: I don't think we actually need to lock here.
+	s.m.Lock()
 	s.items = append(s.items, items...)
-	s.c.Broadcast()
-	s.c.L.Unlock()
+	s.m.Unlock()
+
+	for _, item := range items {
+		for _, l := range s.listeners {
+			l <- item
+		}
+	}
+}
+
+func (s *ListQueue[T]) Close() {
+	// Wait for backlogs to be copied to listeners.
+	s.w.Wait()
+	for _, l := range s.listeners {
+		close(l)
+	}
 }
