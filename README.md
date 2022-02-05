@@ -1,5 +1,8 @@
 # ListQueue
 
+Note: Figuring out wait groups in some cases is a bit finicky currently. The group that lq.Wait() waits on is exposed publicly
+for this reason at the moment, in case you need to add anything to it.
+
 NewListQueue returns a queue which ensures in order delivery of every past and future event to every subscriber.
 
 	q := lq.NewListQueue[int]()
