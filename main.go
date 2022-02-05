@@ -4,7 +4,7 @@ import (
 	"sync"
 )
 
-const ChanSize = 10
+const ChanSize = 1000
 
 type IWaitGroup interface {
 	Add(i int)
@@ -56,61 +56,95 @@ type IListQueue[T any] interface {
 //    	q.Wait()
 //
 func NewListQueue[T any](items ...T) *ListQueue[T] {
+	wg := &sync.WaitGroup{}
+	wg.Add(1)
+
 	return &ListQueue[T]{
 		items: items,
+		keys:  map[string]T{},
+		mKeys: &sync.RWMutex{},
 		m:     &sync.RWMutex{},
-		w:     &sync.WaitGroup{},
+		Wg:    wg,
 	}
 }
 
 type ListQueue[T any] struct {
 	items     []T
+	keys      map[string]T
+	mKeys     *sync.RWMutex
 	m         *sync.RWMutex
-	w         IWaitGroup
+	Wg        IWaitGroup
 	listeners []chan T
 }
 
 // Each returns a channel which will be sent all current and future items passed to Add in the order they were added.
-func (s *ListQueue[T]) Each() chan T {
-	s.w.Add(1)
-
-	s.m.RLock()
+func (lq *ListQueue[T]) Each() chan T {
+	lq.m.RLock()
 	// Grab the number of items at the moment to ensure we don't double process messages in the case we finish iterating
 	// the backlog between the time the backlog updates and items start getting fed to the listeners in s.Add.
-	numItems := len(s.items)
+	numItems := len(lq.items)
+	lq.Wg.Add(numItems)
 
 	// Create a listener right early, so we don't miss any messages added when we are processing the backlog.
-	listener := make(chan T, numItems+ChanSize)
-	s.listeners = append(s.listeners, listener)
-	s.m.RUnlock()
+	writer := make(chan T, numItems+ChanSize)
+	lq.listeners = append(lq.listeners, writer)
+	lq.m.RUnlock()
+
+	reader := make(chan T, 0)
 
 	go func() {
-		for i := 0; i < numItems; i++ {
-			listener <- s.items[i]
+		for i := range writer {
+			reader <- i
+			lq.Wg.Done()
 		}
-		s.w.Done()
+	}()
+	go func() {
+		for i := 0; i < numItems; i++ {
+			writer <- lq.items[i]
+		}
 	}()
 
-	return listener
+	return reader
 }
 
 // Add adds all passsed arguments to the list and wakes up any paused goroutines to continue reading from the list.
-func (s *ListQueue[T]) Add(items ...T) {
-	s.m.Lock()
-	s.items = append(s.items, items...)
-	s.m.Unlock()
+func (lq *ListQueue[T]) Add(items ...T) {
+	lq.m.Lock()
+	work := len(lq.listeners) * len(items)
+	lq.Wg.Add(work)
+	lq.items = append(lq.items, items...)
+	lq.m.Unlock()
 
 	for _, item := range items {
-		for _, l := range s.listeners {
+		for _, l := range lq.listeners {
 			l <- item
 		}
 	}
 }
 
-func (s *ListQueue[T]) Close() {
+func (lq *ListQueue[T]) Wait() {
+	lq.Wg.Done()
 	// Wait for backlogs to be copied to listeners.
-	s.w.Wait()
-	for _, l := range s.listeners {
+	lq.Wg.Wait()
+	for _, l := range lq.listeners {
 		close(l)
+	}
+}
+
+// Add takes a key and value, if the key is unique it will add the value to the queue.
+func (lq *ListQueue[T]) AddUnique(key string, value T) bool {
+	lq.mKeys.RLock()
+	_, ok := lq.keys[key]
+	lq.mKeys.RUnlock()
+
+	if !ok {
+		lq.mKeys.Lock()
+		lq.keys[key] = value
+		lq.mKeys.Unlock()
+
+		lq.Add(value)
+		return true
+	} else {
+		return false
 	}
 }
